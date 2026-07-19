@@ -18,7 +18,10 @@ const IncidentSchema = new mongoose.Schema({
   resolvedAt: { type: Date },
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now }
-}, { collection: "incidents" });
+}, {
+  collection: "incidents",
+  timestamps: { createdAt: "createdAt", updatedAt: "updatedAt" },
+});
 
 IncidentSchema.index({ createdAt: -1 });
 IncidentSchema.index({ active: 1, severity: 1, createdAt: -1 });

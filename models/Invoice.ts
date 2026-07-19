@@ -64,15 +64,12 @@ const InvoiceSchema = new Schema<IInvoice>({
   metadata: { type: Schema.Types.Mixed },
   created_at: { type: Date, default: Date.now },
   updated_at: { type: Date, default: Date.now }
+}, {
+  timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' }
 })
 
 InvoiceSchema.index({ team_id: 1, issued_at: -1 })
 InvoiceSchema.index({ team_id: 1, status: 1 })
-InvoiceSchema.index({ invoice_id: 1 }, { unique: true })
-
-InvoiceSchema.pre('save', function() {
-  this.updated_at = new Date()
-})
 
 interface IInvoiceModel extends Model<IInvoice> {}
 

@@ -8,5 +8,5 @@
     "skipLibCheck": true,
     "types": ["@types/bun"]
   },
-  "include": ["*.ts", "scripts/*.ts"]
+  "include": ["*.ts", "models/*.ts", "scripts/*.ts"]
 }

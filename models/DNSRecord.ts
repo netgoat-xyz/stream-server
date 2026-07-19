@@ -1,3 +1,4 @@
+import { isIP } from 'node:net'
 import mongoose, { Schema, model, models, Model } from 'mongoose'
 
 export interface IDNSRecord {
@@ -54,12 +55,13 @@ const DNSRecordSchema = new Schema<IDNSRecord>({
   created_at: { type: Date, default: Date.now },
   updated_at: { type: Date, default: Date.now },
   created_by: { type: Schema.Types.ObjectId, ref: 'User', required: true }
+}, {
+  timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' }
 })
 
 // Compound indexes
 DNSRecordSchema.index({ domain: 1, type: 1, name: 1 })
 DNSRecordSchema.index({ team_id: 1, domain: 1 })
-DNSRecordSchema.index({ domain_id: 1 })
 
 // Virtuals
 DNSRecordSchema.virtual('full_name').get(function() {
@@ -109,9 +111,10 @@ DNSRecordSchema.statics.findByDomainId = async function(domainId: string, active
 }
 
 DNSRecordSchema.statics.validateRecord = function(type: string, value: string) {
+  if (type === 'A') return isIP(value) === 4
+  if (type === 'AAAA') return isIP(value) === 6
+
   const patterns: Record<string, RegExp> = {
-    A: /^(\d{1,3}\.){3}\d{1,3}$/,
-    AAAA: /^([0-9a-fA-F]{0,4}:){7}[0-9a-fA-F]{0,4}$/,
     CNAME: /^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*$/,
     MX: /^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*$/,
     // TXT, NS, SRV, CAA are more flexible

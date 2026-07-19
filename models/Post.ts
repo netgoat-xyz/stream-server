@@ -18,7 +18,10 @@ const PostSchema = new mongoose.Schema({
   
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now }
-}, { collection: "posts" });
+}, {
+  collection: "posts",
+  timestamps: { createdAt: "createdAt", updatedAt: "updatedAt" },
+});
 
 PostSchema.index({ type: 1, published: 1, createdAt: -1 });
 

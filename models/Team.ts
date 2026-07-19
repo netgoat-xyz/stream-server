@@ -130,6 +130,22 @@ function normalizeEmail(value: string) {
   return value.trim().toLowerCase()
 }
 
+function isValidEmail(value: string) {
+  return value.length <= 320 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)
+}
+
+export function activeInviteQuery(token: string, now = new Date()) {
+  return {
+    invites: {
+      $elemMatch: {
+        token,
+        accepted: false,
+        expires_at: { $gt: now }
+      }
+    }
+  }
+}
+
 function isBuiltinRole(value: string): value is TeamBuiltinRole {
   return value in ROLE_PERMISSION_MATRIX
 }
@@ -331,7 +347,7 @@ const TeamWebhookSettingsSchema = new Schema<ITeamWebhookSettings>(
   { _id: false }
 )
 
-const TeamSchema = new Schema<ITeam>({
+const TeamSchema = new Schema<ITeam, ITeamModel>({
   name: { type: String, required: true },
   slug: { type: String, required: true, unique: true },
   description: { type: String },
@@ -385,6 +401,8 @@ const TeamSchema = new Schema<ITeam>({
   active: { type: Boolean, default: true },
   created_at: { type: Date, default: Date.now },
   updated_at: { type: Date, default: Date.now }
+}, {
+  timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' }
 })
 
 // Indexes (slug already has a unique index from schema definition)
@@ -405,8 +423,9 @@ TeamSchema.virtual('can_add_member').get(function() {
 TeamSchema.methods.addMember = async function(userId: string, role: string = 'member') {
   const normalizedRole = normalizeRoleKey(role)
   const TeamModel = this.constructor as ITeamModel
+  const team = this as unknown as ITeam
 
-  if (!TeamModel.roleExists(this, normalizedRole)) {
+  if (!TeamModel.roleExists(team, normalizedRole)) {
     throw new Error('Invalid team role')
   }
 
@@ -448,8 +467,9 @@ TeamSchema.methods.removeMember = async function(userId: string) {
 TeamSchema.methods.updateMemberRole = async function(userId: string, newRole: string) {
   const normalizedRole = normalizeRoleKey(newRole)
   const TeamModel = this.constructor as ITeamModel
+  const team = this as unknown as ITeam
 
-  if (!TeamModel.roleExists(this, normalizedRole)) {
+  if (!TeamModel.roleExists(team, normalizedRole)) {
     throw new Error('Invalid team role')
   }
 
@@ -475,9 +495,14 @@ TeamSchema.methods.createInvite = async function(email: string, role: string, in
   const normalizedRole = normalizeRoleKey(role)
   const normalizedEmail = normalizeEmail(email)
   const TeamModel = this.constructor as ITeamModel
+  const team = this as unknown as ITeam
 
-  if (!TeamModel.roleExists(this, normalizedRole)) {
+  if (!TeamModel.roleExists(team, normalizedRole)) {
     throw new Error('Invalid team role')
+  }
+
+  if (!isValidEmail(normalizedEmail)) {
+    throw new Error('Invalid invite email')
   }
 
   if (normalizedRole === 'owner') {
@@ -520,6 +545,7 @@ TeamSchema.methods.createInvite = async function(email: string, role: string, in
     permissions?: TeamCapability[]
   }) {
     const TeamModel = this.constructor as ITeamModel
+    const team = this as unknown as ITeam
     const normalizedName = String(role.name || '').trim()
     if (!normalizedName) {
       throw new Error('Role name is required')
@@ -539,7 +565,7 @@ TeamSchema.methods.createInvite = async function(email: string, role: string, in
       throw new Error('Custom role limit reached (25 max)')
     }
 
-    if (TeamModel.roleExists(this, normalizedKey)) {
+    if (TeamModel.roleExists(team, normalizedKey)) {
       throw new Error('Role key already exists')
     }
 
@@ -612,11 +638,7 @@ TeamSchema.statics.findUserTeams = async function(userId: string) {
 }
 
 TeamSchema.statics.findByInviteToken = async function(token: string) {
-  return this.findOne({ 
-    'invites.token': token,
-    'invites.accepted': false,
-    'invites.expires_at': { $gt: new Date() }
-  })
+  return this.findOne(activeInviteQuery(token))
 }
 
 TeamSchema.statics.getUserRole = function(team: ITeam, userId: string) {
@@ -624,7 +646,7 @@ TeamSchema.statics.getUserRole = function(team: ITeam, userId: string) {
   return member?.role || null
 }
 
-TeamSchema.statics.listRoles = function(team: ITeam): IResolvedTeamRole[] {
+TeamSchema.statics.listRoles = function(this: ITeamModel, team: ITeam): IResolvedTeamRole[] {
   const presets = (Object.keys(BUILTIN_ROLE_META) as TeamBuiltinRole[]).map((roleKey) => ({
     key: roleKey,
     name: BUILTIN_ROLE_META[roleKey].name,
@@ -653,16 +675,16 @@ TeamSchema.statics.listRoles = function(team: ITeam): IResolvedTeamRole[] {
   return [...presets, ...custom]
 }
 
-TeamSchema.statics.getRoleDefinition = function(team: ITeam, roleKey: string) {
+TeamSchema.statics.getRoleDefinition = function(this: ITeamModel, team: ITeam, roleKey: string) {
   const normalizedRole = normalizeRoleKey(roleKey)
   return this.listRoles(team).find((role: IResolvedTeamRole) => role.key === normalizedRole) || null
 }
 
-TeamSchema.statics.roleExists = function(team: ITeam, roleKey: string) {
+TeamSchema.statics.roleExists = function(this: ITeamModel, team: ITeam, roleKey: string) {
   return Boolean(this.getRoleDefinition(team, roleKey))
 }
 
-TeamSchema.statics.hasCapability = function(team: ITeam, userId: string, capability: TeamCapability) {
+TeamSchema.statics.hasCapability = function(this: ITeamModel, team: ITeam, userId: string, capability: TeamCapability) {
   const member = team.members.find((m: ITeamMember) => m.user_id.toString() === userId)
   if (!member) return false
 
@@ -676,7 +698,7 @@ TeamSchema.statics.hasCapability = function(team: ITeam, userId: string, capabil
   return role.permissions.includes(capability)
 }
 
-TeamSchema.statics.hasPermission = function(team: ITeam, userId: string, requiredRole: 'owner' | 'admin' | 'member' | 'viewer') {
+TeamSchema.statics.hasPermission = function(this: ITeamModel, team: ITeam, userId: string, requiredRole: 'owner' | 'admin' | 'member' | 'viewer') {
   const member = team.members.find((m: ITeamMember) => m.user_id.toString() === userId)
   if (!member?.role) return false
 

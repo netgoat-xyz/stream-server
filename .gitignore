@@ -1,0 +1,10 @@
+node_modules/
+bun.lock
+.env
+.env.*
+!.env.example
+seed-data.json
+coverage/
+dist/
+*.log
+*.tsbuildinfo

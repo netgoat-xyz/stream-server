@@ -343,8 +343,9 @@ mongoose.connection.on("disconnected", () => {
   connected = false;
 });
 mongoose.connection.on("error", (error) => {
+  const wasConnected = connected;
   connected = false;
-  if (!mongoConnectPromise) LOG.warn(`MongoDB connection error: ${errorMessage(error)}`);
+  if (wasConnected) LOG.warn(`MongoDB connection error: ${errorMessage(error)}`);
 });
 
 async function ensureMongoConnection(force = false): Promise<boolean> {

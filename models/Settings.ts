@@ -11,6 +11,7 @@ const SettingsSchema = new mongoose.Schema({
   proEnabled: { type: Boolean, default: false },
   dnsEnabled: { type: Boolean, default: true },
   reverseProxyEnabled: { type: Boolean, default: true },
+  zeroTrustEnabled: { type: Boolean, default: false },
 
   userDomainLimit: { type: Number, default: 3 },
   dnsRecordLimit: { type: Number, default: 50 },

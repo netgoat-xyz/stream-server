@@ -2,14 +2,17 @@
 import { timingSafeEqual } from "node:crypto";
 import mongoose from "mongoose";
 import DomainModel from "./models/Domain";
+import ProxyConfigModel from "./models/ProxyConfig";
 import SettingsModel from "./models/Settings";
 import UserModel from "./models/User";
+import WAFRuleModel from "./models/WAFRule";
 
 interface Subdomain {
   id: string;
   subdomain: string;
   full_domain: string;
   target_url: string;
+  target_urls?: string[];
   active: boolean;
 }
 
@@ -17,6 +20,7 @@ interface Domain {
   id: string;
   domain: string;
   target_url: string;
+  target_urls?: string[];
   certificate_pem?: string;
   private_key_pem?: string;
   team_id?: string;
@@ -91,7 +95,7 @@ interface DomainsResponse {
   agent_config: AgentConfig;
 }
 
-interface CachedState {
+export interface CachedState {
   domains: Domain[];
   waf_rules: WafRule[];
   users: User[];
@@ -243,7 +247,7 @@ function safeHeader(value: unknown, fallback: string): string {
   return /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/.test(header) ? header : fallback;
 }
 
-function normalizeAgentConfig(input: unknown): AgentConfig {
+export function normalizeAgentConfig(input: unknown): AgentConfig {
   const base = cloneDefaultAgentConfig();
   const raw: AgentConfigInput = input && typeof input === "object" ? input as AgentConfigInput : {};
 
@@ -362,68 +366,221 @@ function emptyState(): CachedState {
   };
 }
 
-async function pullFromMongo(): Promise<CachedState | null> {
-  try {
-    // ── Domains ──────────────────────────────────────────────────
-    const domainDocs = await DomainModel.find({}).lean();
-    const domains: Domain[] = domainDocs.map((doc: any) => ({
-      id: String(doc._id),
-      domain: doc.domain || "",
-      target_url: doc.target_url || "",
-      certificate_pem: doc.certificate_pem || "",
-      private_key_pem: doc.private_key_pem || "",
-      team_id: doc.team_id ? String(doc.team_id) : "",
-      active: doc.active === true,
-      subdomains: (doc.subdomains || []).map((s: any) => ({
-        id: String(s._id || s.subdomain),
-        subdomain: s.subdomain || "",
-        full_domain: s.full_domain || "",
-        target_url: s.target_url || "",
-        active: s.active === true,
-      })),
-    }));
+type PlainRecord = Record<string, unknown>;
 
-    // ── WAF Rules — flatten from all domains ─────────────────────
-    const waf_rules: WafRule[] = [];
-    for (const doc of domainDocs) {
-      for (const rule of (doc as any).waf_rules || []) {
-        waf_rules.push({
-          id: String(rule._id || rule.name),
-          name: rule.name || "",
-          expression: rule.expression || "",
-          action: rule.action || "BLOCK",
-          priority: rule.priority ?? 0,
-          proxy_config_id: "",
-        });
-      }
+interface MongoStateDocuments {
+  domainDocs: readonly unknown[];
+  proxyConfigDocs: readonly unknown[];
+  globalRuleDocs: readonly unknown[];
+  userDocs: readonly unknown[];
+  settingsDoc: unknown;
+  legacyZeroTrustDoc?: unknown;
+}
+
+function asRecord(value: unknown): PlainRecord {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as PlainRecord
+    : {};
+}
+
+function records(value: unknown): PlainRecord[] {
+  return Array.isArray(value) ? value.map(asRecord) : [];
+}
+
+function textValue(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function idValue(value: unknown, fallback = ""): string {
+  if (value === null || value === undefined) return fallback;
+  const id = String(value).trim();
+  return id || fallback;
+}
+
+function routeKey(domainId: string, subdomain: string): string {
+  return `${domainId}\0${subdomain.toLowerCase()}`;
+}
+
+function uniqueTargets(value: unknown, primary = ""): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const target of Array.isArray(value) ? value : []) {
+    const candidate = textValue(target);
+    if (!candidate || candidate === primary || seen.has(candidate)) continue;
+    seen.add(candidate);
+    result.push(candidate);
+  }
+  return result;
+}
+
+/** Converts projected MongoDB documents into the public, agent-facing snapshot. */
+export function buildCachedState(documents: MongoStateDocuments): CachedState {
+  const upstreamsByRoute = new Map<string, string[]>();
+  for (const rawConfig of documents.proxyConfigDocs) {
+    const config = asRecord(rawConfig);
+    if (config.enabled === false) continue;
+    const domainId = idValue(config.domain_id);
+    if (!domainId) continue;
+    const urls = records(config.upstream_servers)
+      .filter((server) => server.down !== true)
+      .map((server) => textValue(server.url))
+      .filter(Boolean);
+    const key = routeKey(domainId, textValue(config.subdomain));
+    upstreamsByRoute.set(key, uniqueTargets([...(upstreamsByRoute.get(key) || []), ...urls]));
+  }
+
+  const domains: Domain[] = [];
+  const wafRules: WafRule[] = [];
+  for (const rawDomain of documents.domainDocs) {
+    const doc = asRecord(rawDomain);
+    if (doc.active === false) continue;
+    const domain = textValue(doc.domain).toLowerCase();
+    if (!domain) continue;
+    const domainId = idValue(doc._id, idValue(doc.id, domain));
+    const targetUrl = textValue(doc.target_url);
+    const targetUrls = uniqueTargets(upstreamsByRoute.get(routeKey(domainId, "")), targetUrl);
+
+    const subdomains: Subdomain[] = [];
+    for (const rawSubdomain of records(doc.subdomains)) {
+      if (rawSubdomain.active === false) continue;
+      const subdomain = textValue(rawSubdomain.subdomain).toLowerCase();
+      const fullDomain = (textValue(rawSubdomain.full_domain) || (subdomain ? `${subdomain}.${domain}` : ""))
+        .toLowerCase();
+      if (!fullDomain) continue;
+      const subdomainTarget = textValue(rawSubdomain.target_url);
+      subdomains.push({
+        id: idValue(rawSubdomain._id, idValue(rawSubdomain.id, fullDomain)),
+        subdomain,
+        full_domain: fullDomain,
+        target_url: subdomainTarget,
+        target_urls: uniqueTargets(upstreamsByRoute.get(routeKey(domainId, subdomain)), subdomainTarget),
+        active: true,
+      });
     }
 
-    // ── Users ────────────────────────────────────────────────────
-    const userDocs = await UserModel.find({}).lean();
-    const users: User[] = userDocs.map((doc: any) => ({
-      id: String(doc._id),
-      username: doc.name || doc.email?.split("@")[0] || "",
-      email: doc.email || "",
-      role: doc.role || "user",
-    }));
+    domains.push({
+      id: domainId,
+      domain,
+      target_url: targetUrl,
+      target_urls: targetUrls,
+      certificate_pem: textValue(doc.certificate_pem),
+      private_key_pem: textValue(doc.private_key_pem),
+      team_id: idValue(doc.team_id),
+      active: true,
+      subdomains,
+    });
 
-    let zero_trust_enabled = false;
-    const settingsDoc = await SettingsModel.findOne({}).select("agentConfig zeroTrustEnabled").lean();
-    const agent_config = normalizeAgentConfig((settingsDoc as any)?.agentConfig);
-    zero_trust_enabled = (settingsDoc as any)?.zeroTrustEnabled === true;
+    for (const rule of records(doc.waf_rules)) {
+      const normalized = normalizeWafRule(rule, domainId);
+      if (normalized) wafRules.push(normalized);
+    }
+  }
+
+  for (const rawRule of documents.globalRuleDocs) {
+    const rule = asRecord(rawRule);
+    const normalized = normalizeWafRule(rule, idValue(rule.proxy_config_id));
+    if (normalized) wafRules.push(normalized);
+  }
+  wafRules.sort((left, right) => right.priority - left.priority || left.name.localeCompare(right.name));
+
+  const users: User[] = [];
+  for (const rawUser of documents.userDocs) {
+    const doc = asRecord(rawUser);
+    if (doc.banned === true) continue;
+    const email = textValue(doc.email).toLowerCase();
+    const username = textValue(doc.name) || email.split("@")[0] || "";
+    if (!username) continue;
+    users.push({
+      id: idValue(doc._id, idValue(doc.id, username)),
+      username,
+      email,
+      role: textValue(doc.role) || "user",
+    });
+  }
+
+  const settings = asRecord(documents.settingsDoc);
+  const legacyZeroTrust = asRecord(documents.legacyZeroTrustDoc).value;
+  const zeroTrustEnabled = typeof settings.zeroTrustEnabled === "boolean"
+    ? settings.zeroTrustEnabled
+    : legacyZeroTrust === true || legacyZeroTrust === "true";
+
+  return {
+    domains,
+    waf_rules: wafRules,
+    users,
+    zero_trust_enabled: zeroTrustEnabled,
+    agent_config: normalizeAgentConfig(settings.agentConfig),
+    last_pulled: new Date(),
+  };
+}
+
+function normalizeWafRule(rule: PlainRecord, scopeId: string): WafRule | null {
+  if (rule.enabled === false) return null;
+  const name = textValue(rule.name);
+  const expression = textValue(rule.expression);
+  if (!name || !expression) return null;
+  const rawAction = textValue(rule.action).toUpperCase();
+  const action = rawAction === "ALLOW" || rawAction === "LOG" || rawAction === "BLOCK"
+    ? rawAction
+    : "BLOCK";
+  const rawPriority = Number(rule.priority);
+  return {
+    id: idValue(rule._id, idValue(rule.id, name)),
+    name,
+    expression,
+    action,
+    priority: Number.isFinite(rawPriority) ? Math.trunc(rawPriority) : 0,
+    proxy_config_id: scopeId,
+  };
+}
+
+async function pullFromMongo(): Promise<CachedState | null> {
+  try {
+    const [domainDocs, proxyConfigDocs, globalRuleDocs, userDocs, settingsDoc, legacyZeroTrustDoc] =
+      await Promise.all([
+        DomainModel.find({ active: { $ne: false } })
+          .select("_id domain target_url certificate_pem private_key_pem team_id active subdomains waf_rules")
+          .sort({ domain: 1 })
+          .lean(),
+        ProxyConfigModel.find({ enabled: { $ne: false } })
+          .select("_id domain_id subdomain upstream_servers enabled")
+          .lean(),
+        WAFRuleModel.find({ enabled: { $ne: false } })
+          .select("_id name expression action priority proxy_config_id enabled")
+          .sort({ priority: -1, name: 1 })
+          .lean(),
+        UserModel.find({ banned: { $ne: true } })
+          .select("_id name email role banned")
+          .sort({ name: 1, email: 1 })
+          .lean(),
+        SettingsModel.findOne({
+          $or: [
+            { agentConfig: { $exists: true } },
+            { zeroTrustEnabled: { $exists: true } },
+          ],
+        })
+          .select("agentConfig zeroTrustEnabled updatedAt")
+          .sort({ updatedAt: -1, _id: -1 })
+          .lean(),
+        SettingsModel.collection.findOne(
+          { key: "zero_trust_enabled" },
+          { projection: { value: 1 } },
+        ),
+      ]);
+
+    const nextState = buildCachedState({
+      domainDocs,
+      proxyConfigDocs,
+      globalRuleDocs,
+      userDocs,
+      settingsDoc,
+      legacyZeroTrustDoc,
+    });
 
     LOG.info(
-      `Pulled from MongoDB: ${domains.length} domains, ${waf_rules.length} rules, ${users.length} users`
+      `Pulled from MongoDB: ${nextState.domains.length} domains, ${nextState.waf_rules.length} rules, ${nextState.users.length} users`
     );
-
-    return {
-      domains,
-      waf_rules,
-      users,
-      zero_trust_enabled,
-      agent_config,
-      last_pulled: new Date(),
-    };
+    return nextState;
   } catch (err) {
     LOG.error("MongoDB pull failed:", err);
     return null;
@@ -606,4 +763,9 @@ async function main() {
   LOG.info(`Seed file: ${SEED_FILE}  (${cachedState.domains.length} domains, ${cachedState.waf_rules.length} rules)`);
 }
 
-main();
+if (import.meta.main) {
+  main().catch((error: unknown) => {
+    LOG.error("Stream server failed to start:", error);
+    process.exitCode = 1;
+  });
+}

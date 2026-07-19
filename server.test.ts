@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { buildCachedState, normalizeAgentConfig } from "./server";
+import {
+  buildCachedState,
+  normalizeAgentConfig,
+  readJSONBody,
+  redactMongoUri,
+} from "./server";
 import { normalizeSeedData } from "./scripts/seed-mongo";
 
 describe("normalizeAgentConfig", () => {
@@ -7,6 +12,7 @@ describe("normalizeAgentConfig", () => {
     const config = normalizeAgentConfig({
       cache: { enabled: true, ttl_seconds: -10, max_entries: "250" },
       rate_limit: { requests_per_minute: 2_000_000, key: "invalid" },
+      metrics: { enabled: true, path: "https://example.com/metrics" },
       koda_waf: { threshold: 9, feature_header: "bad header" },
     });
 
@@ -15,8 +21,64 @@ describe("normalizeAgentConfig", () => {
     expect(config.cache.max_entries).toBe(250);
     expect(config.rate_limit.requests_per_minute).toBe(1_000_000);
     expect(config.rate_limit.key).toBe("ip");
+    expect(config.metrics.path).toBe("/__netgoat/metrics");
     expect(config.koda_waf.threshold).toBe(1);
     expect(config.koda_waf.feature_header).toBe("X-KodaWaf-Features");
+  });
+
+  test("does not partially parse malformed numbers", () => {
+    const config = normalizeAgentConfig({ cache: { max_entries: "250garbage" } });
+    expect(config.cache.max_entries).toBe(1024);
+  });
+});
+
+describe("request parsing and secret redaction", () => {
+  test("parses a bounded JSON request", async () => {
+    const request = new Request("http://localhost/agent-config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ metrics: { enabled: true } }),
+    });
+    expect(await readJSONBody(request)).toEqual({ metrics: { enabled: true } });
+  });
+
+  test("rejects declared and streamed oversized bodies", async () => {
+    const declared = new Request("http://localhost/agent-config", {
+      method: "PUT",
+      headers: { "Content-Length": "65537", "Content-Type": "application/json" },
+      body: "{}",
+    });
+    await expect(readJSONBody(declared)).rejects.toThrow("request body too large");
+
+    const streamed = new Request("http://localhost/agent-config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: `"${"x".repeat(65537)}"`,
+    });
+    await expect(readJSONBody(streamed)).rejects.toThrow("request body too large");
+  });
+
+  test("rejects unsupported media types and malformed JSON", async () => {
+    const wrongType = new Request("http://localhost/agent-config", {
+      method: "PUT",
+      headers: { "Content-Type": "text/plain" },
+      body: "{}",
+    });
+    await expect(readJSONBody(wrongType)).rejects.toThrow("content-type must be application/json");
+
+    const malformed = new Request("http://localhost/agent-config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: "{",
+    });
+    await expect(readJSONBody(malformed)).rejects.toThrow("invalid JSON body");
+  });
+
+  test("redacts MongoDB credentials", () => {
+    const redacted = redactMongoUri("mongodb+srv://alice:secret@cluster.example/netgoat");
+    expect(redacted).not.toContain("alice");
+    expect(redacted).not.toContain("secret");
+    expect(redacted).toContain("cluster.example");
   });
 });
 

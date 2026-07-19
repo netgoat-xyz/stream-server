@@ -1,6 +1,9 @@
 import mongoose from "mongoose";
 
 const SettingsSchema = new mongoose.Schema({
+  // Legacy key/value settings are retained for backward-compatible reads.
+  key: { type: String },
+  value: { type: mongoose.Schema.Types.Mixed },
   siteName: { type: String, default: "NetGoat" },
   registrationEnabled: { type: Boolean, default: true },
   maintenanceMode: { type: Boolean, default: false },

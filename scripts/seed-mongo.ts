@@ -156,12 +156,14 @@ export async function main(): Promise<void> {
       upsertDocuments(wafRules, data.waf_rules, "name"),
       upsertDocuments(users, data.users, "name"),
       db.collection("settings").findOneAndUpdate(
-        {},
+        { key: { $exists: false } },
         {
           $set: {
             zeroTrustEnabled: data.zero_trust_enabled,
             agentConfig: data.agent_config,
+            updatedAt: new Date(),
           },
+          $setOnInsert: { createdAt: new Date() },
         },
         { upsert: true },
       ),

@@ -143,11 +143,30 @@ describe("buildCachedState", () => {
     expect(state.domains[0]?.subdomains[0]?.target_urls).toEqual(["https://api-secondary.internal"]);
     expect(state.waf_rules.map((rule) => rule.name)).toEqual(["global", "block bots"]);
     expect(state.waf_rules[0]?.action).toBe("ALLOW");
+    expect(state.waf_rules.find((rule) => rule.name === "block bots")?.hosts).toEqual([
+      "example.com",
+      "api.example.com",
+    ]);
     expect(state.users).toEqual([
       { id: "user-1", username: "Alice", email: "alice@example.com", role: "user" },
     ]);
     expect(state.zero_trust_enabled).toBe(true);
     expect(state.agent_config.metrics).toEqual({ enabled: true, path: "/metrics" });
+  });
+
+  test("scopes proxy WAF rules to their resolved route host", () => {
+    const state = buildCachedState({
+      domainDocs: [{ _id: "domain-1", domain: "example.com", subdomains: [{ subdomain: "api" }] }],
+      proxyConfigDocs: [{ _id: "proxy-1", domain_id: "domain-1", subdomain: "api" }],
+      globalRuleDocs: [
+        { _id: "scoped", name: "api only", expression: "Path == '/private'", proxy_config_id: "proxy-1" },
+        { _id: "stale", name: "stale scope", expression: "true", proxy_config_id: "missing" },
+      ],
+      userDocs: [],
+      settingsDoc: {},
+    });
+    expect(state.waf_rules).toHaveLength(1);
+    expect(state.waf_rules[0]?.hosts).toEqual(["api.example.com"]);
   });
 
   test("reads the legacy zero-trust settings record", () => {

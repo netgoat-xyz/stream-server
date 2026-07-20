@@ -35,6 +35,7 @@ interface WafRule {
   action: string;
   priority: number;
   proxy_config_id?: string;
+  hosts?: string[];
 }
 
 interface User {
@@ -507,6 +508,24 @@ function uniqueTargets(value: unknown, primary = ""): string[] {
 
 /** Converts projected MongoDB documents into the public, agent-facing snapshot. */
 export function buildCachedState(documents: MongoStateDocuments): CachedState {
+  const hostsByScope = new Map<string, string[]>();
+  for (const rawDomain of documents.domainDocs) {
+    const doc = asRecord(rawDomain);
+    if (doc.active === false) continue;
+    const domain = textValue(doc.domain).toLowerCase();
+    if (!domain) continue;
+    const domainId = idValue(doc._id, idValue(doc.id, domain));
+    const hosts = [domain];
+    for (const rawSubdomain of records(doc.subdomains)) {
+      if (rawSubdomain.active === false) continue;
+      const subdomain = textValue(rawSubdomain.subdomain).toLowerCase();
+      const fullDomain = (textValue(rawSubdomain.full_domain) || (subdomain ? `${subdomain}.${domain}` : ""))
+        .toLowerCase();
+      if (fullDomain) hosts.push(fullDomain);
+    }
+    hostsByScope.set(domainId, [...new Set(hosts)]);
+  }
+
   const upstreamsByRoute = new Map<string, string[]>();
   for (const rawConfig of documents.proxyConfigDocs) {
     const config = asRecord(rawConfig);
@@ -519,6 +538,13 @@ export function buildCachedState(documents: MongoStateDocuments): CachedState {
       .filter(Boolean);
     const key = routeKey(domainId, textValue(config.subdomain));
     upstreamsByRoute.set(key, uniqueTargets([...(upstreamsByRoute.get(key) || []), ...urls]));
+    const configId = idValue(config._id, idValue(config.id));
+    const domainHosts = hostsByScope.get(domainId);
+    if (configId && domainHosts?.length) {
+      const subdomain = textValue(config.subdomain).toLowerCase();
+      const scopedHost = subdomain ? `${subdomain}.${domainHosts[0]}` : domainHosts[0];
+      hostsByScope.set(configId, [scopedHost]);
+    }
   }
 
   const domains: Domain[] = [];
@@ -563,14 +589,15 @@ export function buildCachedState(documents: MongoStateDocuments): CachedState {
     });
 
     for (const rule of records(doc.waf_rules)) {
-      const normalized = normalizeWafRule(rule, domainId);
+      const normalized = normalizeWafRule(rule, domainId, hostsByScope.get(domainId));
       if (normalized) wafRules.push(normalized);
     }
   }
 
   for (const rawRule of documents.globalRuleDocs) {
     const rule = asRecord(rawRule);
-    const normalized = normalizeWafRule(rule, idValue(rule.proxy_config_id));
+    const scopeId = idValue(rule.proxy_config_id);
+    const normalized = normalizeWafRule(rule, scopeId, scopeId ? hostsByScope.get(scopeId) : undefined);
     if (normalized) wafRules.push(normalized);
   }
   wafRules.sort((left, right) => right.priority - left.priority || left.name.localeCompare(right.name));
@@ -606,11 +633,12 @@ export function buildCachedState(documents: MongoStateDocuments): CachedState {
   };
 }
 
-function normalizeWafRule(rule: PlainRecord, scopeId: string): WafRule | null {
+function normalizeWafRule(rule: PlainRecord, scopeId: string, scopeHosts?: string[]): WafRule | null {
   if (rule.enabled === false) return null;
   const name = textValue(rule.name);
   const expression = textValue(rule.expression);
   if (!name || !expression) return null;
+  if (scopeId && (!scopeHosts || scopeHosts.length === 0)) return null;
   const rawAction = textValue(rule.action).toUpperCase();
   const action = rawAction === "ALLOW" || rawAction === "LOG" || rawAction === "BLOCK"
     ? rawAction
@@ -623,6 +651,7 @@ function normalizeWafRule(rule: PlainRecord, scopeId: string): WafRule | null {
     action,
     priority: Number.isFinite(rawPriority) ? Math.trunc(rawPriority) : 0,
     proxy_config_id: scopeId,
+    hosts: scopeId ? [...(scopeHosts || [])] : undefined,
   };
 }
 

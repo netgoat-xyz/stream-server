@@ -45,6 +45,11 @@ All JSON responses are marked `Cache-Control: no-store` because snapshots can
 contain TLS private keys. Request bodies for configuration updates are limited
 to 64 KiB.
 
+WAF rules associated with a domain or proxy configuration include a normalized
+`hosts` list in `/domains`. Agents combine that list with the rule expression,
+so a route-specific rule cannot silently become global. Scoped rules whose
+route no longer exists are omitted from the published snapshot.
+
 ## Seed data
 
 `scripts/seed-mongo.ts` accepts the same top-level data shape served to agents:

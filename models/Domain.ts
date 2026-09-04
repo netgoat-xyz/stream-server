@@ -17,7 +17,10 @@ const SubdomainSchema = new mongoose.Schema({
   active: { type: Boolean, default: true },
   certificate_pem: String,
   private_key_pem: String,
-  
+  // Optional route-scoped cache and bandwidth policy. Omitted values inherit
+  // the agent defaults and are published as agent-facing `policy`.
+  route_policy: { type: mongoose.Schema.Types.Mixed },
+
   // Subdomain-specific WAF rules
   waf_rules: [SubdomainWAFRuleSchema],
   
@@ -55,6 +58,9 @@ const DomainSchema = new mongoose.Schema({
   private_key_pem: String,
   ssl_enabled: { type: Boolean, default: false },
   auto_ssl: { type: Boolean, default: false },
+
+  // Optional route-scoped cache and bandwidth policy published to agents as `policy`.
+  route_policy: { type: mongoose.Schema.Types.Mixed },
   
   // Status
   active: { type: Boolean, default: true },

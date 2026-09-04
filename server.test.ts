@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   buildCachedState,
   normalizeAgentConfig,
+  normalizeRoutePolicy,
   readJSONBody,
   redactMongoUri,
 } from "./server";
@@ -147,6 +148,8 @@ describe("buildCachedState", () => {
       "example.com",
       "api.example.com",
     ]);
+    expect(state.waf_rules.find((rule) => rule.name === "global")?.expression).toBe("attack");
+    expect(JSON.parse(JSON.stringify(state.domains[0]))).not.toHaveProperty("policy");
     expect(state.users).toEqual([
       { id: "user-1", username: "Alice", email: "alice@example.com", role: "user" },
     ]);
@@ -180,6 +183,113 @@ describe("buildCachedState", () => {
     });
 
     expect(state.zero_trust_enabled).toBe(true);
+  });
+
+  test("emits frontend-saved targets, certs, domain waf_rules, and policy", () => {
+    const state = buildCachedState({
+      domainDocs: [{
+        _id: "domain-1",
+        domain: "example.com",
+        target_url: "https://origin.internal",
+        certificate_pem: "-----BEGIN CERTIFICATE-----\nROOT\n-----END CERTIFICATE-----",
+        private_key_pem: "-----BEGIN PRIVATE KEY-----\nROOT\n-----END PRIVATE KEY-----",
+        route_policy: {
+          cache: { enabled: true, ttl_seconds: 30, unknown_flag: true },
+          bandwidth: { enabled: true, bytes_per_second: 4096, burst_bytes: 8192, key: "host" },
+          rate_limit: { enabled: true },
+        },
+        subdomains: [{
+          _id: "sub-1",
+          subdomain: "api",
+          full_domain: "api.example.com",
+          target_url: "https://api.internal",
+          route_policy: { cache: { ttl_seconds: 15 } },
+        }],
+        waf_rules: [{ _id: "rule-1", name: "block bots", expression: "bot", priority: 10 }],
+      }],
+      proxyConfigDocs: [
+        {
+          domain_id: "domain-1",
+          upstream_servers: [
+            { url: "https://origin.internal" },
+            { url: "https://secondary.internal" },
+          ],
+        },
+        {
+          domain_id: "domain-1",
+          subdomain: "api",
+          upstream_servers: [{ url: "https://api-secondary.internal" }],
+        },
+      ],
+      globalRuleDocs: [],
+      userDocs: [],
+      settingsDoc: {},
+    });
+
+    const domainJson = JSON.parse(JSON.stringify(state.domains[0]));
+    expect(domainJson).not.toHaveProperty("route_policy");
+    expect(domainJson.target_url).toBe("https://origin.internal");
+    expect(domainJson.target_urls).toEqual(["https://secondary.internal"]);
+    expect(domainJson.policy).toEqual({
+      cache: { enabled: true, ttl_seconds: 30 },
+      bandwidth: { enabled: true, bytes_per_second: 4096, burst_bytes: 8192, key: "host" },
+    });
+    expect(domainJson.certificate_pem).toContain("BEGIN CERTIFICATE");
+    expect(domainJson.private_key_pem).toContain("BEGIN PRIVATE KEY");
+    expect(domainJson.subdomains[0].target_urls).toEqual(["https://api-secondary.internal"]);
+    expect(domainJson.subdomains[0].policy).toEqual({ cache: { ttl_seconds: 15 } });
+    expect(domainJson.subdomains[0]).not.toHaveProperty("certificate_pem");
+    expect(state.waf_rules).toEqual([expect.objectContaining({
+      name: "block bots",
+      expression: "bot",
+      hosts: ["example.com", "api.example.com"],
+    })]);
+  });
+
+  test("omits empty policy and drops invalid bandwidth keys", () => {
+    const state = buildCachedState({
+      domainDocs: [
+        {
+          _id: "empty",
+          domain: "empty.example",
+          route_policy: { cache: {}, bandwidth: { key: "asn" } },
+        },
+        {
+          _id: "partial",
+          domain: "partial.example",
+          route_policy: { bandwidth: { bytes_per_second: 4096, key: "asn" } },
+        },
+        {
+          _id: "seed",
+          domain: "seed.example",
+          policy: { cache: { enabled: false } },
+        },
+      ],
+      proxyConfigDocs: [],
+      globalRuleDocs: [],
+      userDocs: [],
+      settingsDoc: {},
+    });
+
+    const [emptyDomain, partialDomain, seedDomain] = state.domains.map((domain) => JSON.parse(JSON.stringify(domain)));
+    expect(emptyDomain).not.toHaveProperty("policy");
+    expect(partialDomain.policy).toEqual({ bandwidth: { bytes_per_second: 4096 } });
+    expect(seedDomain.policy).toEqual({ cache: { enabled: false } });
+  });
+});
+
+describe("normalizeRoutePolicy", () => {
+  test("drops unknown keys and out-of-range numbers without clamping", () => {
+    expect(normalizeRoutePolicy({
+      cache: { enabled: true, ttl_seconds: 0, max_entries: 250 },
+      bandwidth: { key: "route", bytes_per_second: 512 },
+      extra: true,
+    })).toEqual({
+      cache: { enabled: true, max_entries: 250 },
+      bandwidth: { key: "route" },
+    });
+    expect(normalizeRoutePolicy(null)).toBeUndefined();
+    expect(normalizeRoutePolicy({ cache: { ttl_seconds: "30" } })).toEqual({ cache: { ttl_seconds: 30 } });
   });
 });
 

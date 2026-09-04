@@ -7,12 +7,33 @@ import SettingsModel from "./models/Settings";
 import UserModel from "./models/User";
 import WAFRuleModel from "./models/WAFRule";
 
+interface RouteCachePolicy {
+  enabled?: boolean;
+  ttl_seconds?: number;
+  max_entries?: number;
+  max_body_bytes?: number;
+}
+
+interface RouteBandwidthPolicy {
+  enabled?: boolean;
+  bytes_per_second?: number;
+  burst_bytes?: number;
+  key?: AgentKeyMode;
+}
+
+/** Agent-facing per-route overrides (`policy.RoutePolicy`). Empty objects are omitted. */
+export interface RoutePolicy {
+  cache?: RouteCachePolicy;
+  bandwidth?: RouteBandwidthPolicy;
+}
+
 interface Subdomain {
   id: string;
   subdomain: string;
   full_domain: string;
   target_url: string;
   target_urls?: string[];
+  policy?: RoutePolicy;
   active: boolean;
 }
 
@@ -23,6 +44,7 @@ interface Domain {
   target_urls?: string[];
   certificate_pem?: string;
   private_key_pem?: string;
+  policy?: RoutePolicy;
   team_id?: string;
   active: boolean;
   subdomains: Subdomain[];
@@ -506,6 +528,70 @@ function uniqueTargets(value: unknown, primary = ""): string[] {
   return result;
 }
 
+function optionalBool(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
+}
+
+function optionalBoundedInt(value: unknown, min: number, max: number): number | undefined {
+  const n = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+  if (!Number.isInteger(n) || n < min || n > max) return undefined;
+  return n;
+}
+
+function optionalKeyMode(value: unknown): AgentKeyMode | undefined {
+  return value === "ip" || value === "host" || value === "route" || value === "global"
+    ? value
+    : undefined;
+}
+
+function definedEntries<T extends Record<string, unknown>>(value: T): T | undefined {
+  const entries = Object.entries(value).filter(([, entry]) => entry !== undefined);
+  if (entries.length === 0) return undefined;
+  return Object.fromEntries(entries) as T;
+}
+
+/**
+ * Maps Mongo `route_policy` (or seed/agent `policy`) onto the Go agent contract.
+ * Unknown keys are dropped. Invalid bandwidth keys and out-of-range numbers are
+ * dropped (not clamped) so `policy.RoutePolicy.Validate()` cannot reject the
+ * whole snapshot. Empty objects are omitted.
+ */
+export function normalizeRoutePolicy(input: unknown): RoutePolicy | undefined {
+  if (input === null || input === undefined || typeof input !== "object" || Array.isArray(input)) {
+    return undefined;
+  }
+  const raw = input as PlainRecord;
+  const policy: RoutePolicy = {};
+
+  if (raw.cache !== null && typeof raw.cache === "object" && !Array.isArray(raw.cache)) {
+    const cacheRaw = raw.cache as PlainRecord;
+    const cache = definedEntries({
+      enabled: optionalBool(cacheRaw.enabled),
+      ttl_seconds: optionalBoundedInt(cacheRaw.ttl_seconds, 1, 86400),
+      max_entries: optionalBoundedInt(cacheRaw.max_entries, 1, 100000),
+      max_body_bytes: optionalBoundedInt(cacheRaw.max_body_bytes, 1024, 104857600),
+    });
+    if (cache) policy.cache = cache;
+  }
+
+  if (raw.bandwidth !== null && typeof raw.bandwidth === "object" && !Array.isArray(raw.bandwidth)) {
+    const bandwidthRaw = raw.bandwidth as PlainRecord;
+    const bandwidth = definedEntries({
+      enabled: optionalBool(bandwidthRaw.enabled),
+      bytes_per_second: optionalBoundedInt(bandwidthRaw.bytes_per_second, 1024, 10737418240),
+      burst_bytes: optionalBoundedInt(bandwidthRaw.burst_bytes, 1024, 10737418240),
+      key: optionalKeyMode(bandwidthRaw.key),
+    });
+    if (bandwidth) policy.bandwidth = bandwidth;
+  }
+
+  return policy.cache || policy.bandwidth ? policy : undefined;
+}
+
+function routePolicyFromDoc(doc: PlainRecord): RoutePolicy | undefined {
+  return normalizeRoutePolicy(doc.route_policy ?? doc.policy);
+}
+
 /** Converts projected MongoDB documents into the public, agent-facing snapshot. */
 export function buildCachedState(documents: MongoStateDocuments): CachedState {
   const hostsByScope = new Map<string, string[]>();
@@ -572,6 +658,7 @@ export function buildCachedState(documents: MongoStateDocuments): CachedState {
         full_domain: fullDomain,
         target_url: subdomainTarget,
         target_urls: uniqueTargets(upstreamsByRoute.get(routeKey(domainId, subdomain)), subdomainTarget),
+        policy: routePolicyFromDoc(rawSubdomain),
         active: true,
       });
     }
@@ -583,6 +670,7 @@ export function buildCachedState(documents: MongoStateDocuments): CachedState {
       target_urls: targetUrls,
       certificate_pem: textValue(doc.certificate_pem),
       private_key_pem: textValue(doc.private_key_pem),
+      policy: routePolicyFromDoc(doc),
       team_id: idValue(doc.team_id),
       active: true,
       subdomains,
@@ -660,7 +748,7 @@ async function pullFromMongo(): Promise<CachedState | null> {
     const [domainDocs, proxyConfigDocs, globalRuleDocs, userDocs, settingsDoc, legacyZeroTrustDoc] =
       await Promise.all([
         DomainModel.find({ active: { $ne: false } })
-          .select("_id domain target_url certificate_pem private_key_pem team_id active subdomains waf_rules")
+          .select("_id domain target_url certificate_pem private_key_pem team_id active subdomains waf_rules route_policy")
           .sort({ domain: 1 })
           .lean(),
         ProxyConfigModel.find({ enabled: { $ne: false } })

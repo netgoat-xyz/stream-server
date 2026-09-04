@@ -6,11 +6,12 @@ MongoDB, then exposes normalized snapshots for polling agents. If MongoDB is
 unavailable, the last in-memory snapshot remains active and startup can fall
 back to a local seed file.
 
-Dashboard writes (routes, TLS PEMs, and `route_policy`) land in MongoDB. This
-service polls those documents and publishes `GET /domains` for the NetGoat
-agent. The agent-facing JSON field is **`policy`** (`cache` / `bandwidth`), not
-`route_policy`, so UI-managed route policy reaches the agent without YAML.
-Domain-embedded and global `waf_rules` stay on the same snapshot.
+Dashboard writes (ProxyConfig upstreams, TLS PEMs, domain `waf_rules`, and
+`route_policy`) land in MongoDB. This service polls those documents and
+publishes `GET /domains` for the NetGoat agent. The agent-facing JSON field is
+**`policy`** (`cache` / `bandwidth`), not `route_policy`, so UI-managed route
+policy reaches the agent without YAML. Snapshot fields stay within the Go
+agent contract: `policy`, certs, targets, and `waf_rules`.
 
 ## Run it
 

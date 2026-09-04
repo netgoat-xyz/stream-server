@@ -33,8 +33,6 @@ interface Subdomain {
   full_domain: string;
   target_url: string;
   target_urls?: string[];
-  certificate_pem?: string;
-  private_key_pem?: string;
   policy?: RoutePolicy;
   active: boolean;
 }
@@ -594,11 +592,6 @@ function routePolicyFromDoc(doc: PlainRecord): RoutePolicy | undefined {
   return normalizeRoutePolicy(doc.route_policy ?? doc.policy);
 }
 
-function optionalPem(value: unknown): string | undefined {
-  const pem = textValue(value);
-  return pem || undefined;
-}
-
 /** Converts projected MongoDB documents into the public, agent-facing snapshot. */
 export function buildCachedState(documents: MongoStateDocuments): CachedState {
   const hostsByScope = new Map<string, string[]>();
@@ -665,8 +658,6 @@ export function buildCachedState(documents: MongoStateDocuments): CachedState {
         full_domain: fullDomain,
         target_url: subdomainTarget,
         target_urls: uniqueTargets(upstreamsByRoute.get(routeKey(domainId, subdomain)), subdomainTarget),
-        certificate_pem: optionalPem(rawSubdomain.certificate_pem),
-        private_key_pem: optionalPem(rawSubdomain.private_key_pem),
         policy: routePolicyFromDoc(rawSubdomain),
         active: true,
       });

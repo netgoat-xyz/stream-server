@@ -185,7 +185,7 @@ describe("buildCachedState", () => {
     expect(state.zero_trust_enabled).toBe(true);
   });
 
-  test("emits Mongo route_policy as agent-facing policy and keeps certs plus WAF", () => {
+  test("emits frontend-saved targets, certs, domain waf_rules, and policy", () => {
     const state = buildCachedState({
       domainDocs: [{
         _id: "domain-1",
@@ -203,36 +203,47 @@ describe("buildCachedState", () => {
           subdomain: "api",
           full_domain: "api.example.com",
           target_url: "https://api.internal",
-          certificate_pem: "-----BEGIN CERTIFICATE-----\nAPI\n-----END CERTIFICATE-----",
-          private_key_pem: "-----BEGIN PRIVATE KEY-----\nAPI\n-----END PRIVATE KEY-----",
           route_policy: { cache: { ttl_seconds: 15 } },
         }],
         waf_rules: [{ _id: "rule-1", name: "block bots", expression: "bot", priority: 10 }],
       }],
-      proxyConfigDocs: [],
-      globalRuleDocs: [
-        { _id: "global-1", name: "global", expression: "attack", action: "allow", priority: 20 },
+      proxyConfigDocs: [
+        {
+          domain_id: "domain-1",
+          upstream_servers: [
+            { url: "https://origin.internal" },
+            { url: "https://secondary.internal" },
+          ],
+        },
+        {
+          domain_id: "domain-1",
+          subdomain: "api",
+          upstream_servers: [{ url: "https://api-secondary.internal" }],
+        },
       ],
+      globalRuleDocs: [],
       userDocs: [],
       settingsDoc: {},
     });
 
     const domainJson = JSON.parse(JSON.stringify(state.domains[0]));
     expect(domainJson).not.toHaveProperty("route_policy");
+    expect(domainJson.target_url).toBe("https://origin.internal");
+    expect(domainJson.target_urls).toEqual(["https://secondary.internal"]);
     expect(domainJson.policy).toEqual({
       cache: { enabled: true, ttl_seconds: 30 },
       bandwidth: { enabled: true, bytes_per_second: 4096, burst_bytes: 8192, key: "host" },
     });
     expect(domainJson.certificate_pem).toContain("BEGIN CERTIFICATE");
     expect(domainJson.private_key_pem).toContain("BEGIN PRIVATE KEY");
+    expect(domainJson.subdomains[0].target_urls).toEqual(["https://api-secondary.internal"]);
     expect(domainJson.subdomains[0].policy).toEqual({ cache: { ttl_seconds: 15 } });
-    expect(domainJson.subdomains[0].certificate_pem).toContain("API");
-    expect(domainJson.subdomains[0].private_key_pem).toContain("API");
-    expect(state.waf_rules.map((rule) => rule.name)).toEqual(["global", "block bots"]);
-    expect(state.waf_rules.find((rule) => rule.name === "block bots")?.hosts).toEqual([
-      "example.com",
-      "api.example.com",
-    ]);
+    expect(domainJson.subdomains[0]).not.toHaveProperty("certificate_pem");
+    expect(state.waf_rules).toEqual([expect.objectContaining({
+      name: "block bots",
+      expression: "bot",
+      hosts: ["example.com", "api.example.com"],
+    })]);
   });
 
   test("omits empty policy and drops invalid bandwidth keys", () => {

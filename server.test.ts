@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   buildCachedState,
   normalizeAgentConfig,
+  normalizeRoutePolicy,
   readJSONBody,
   redactMongoUri,
 } from "./server";
@@ -147,6 +148,8 @@ describe("buildCachedState", () => {
       "example.com",
       "api.example.com",
     ]);
+    expect(state.waf_rules.find((rule) => rule.name === "global")?.expression).toBe("attack");
+    expect(JSON.parse(JSON.stringify(state.domains[0]))).not.toHaveProperty("policy");
     expect(state.users).toEqual([
       { id: "user-1", username: "Alice", email: "alice@example.com", role: "user" },
     ]);
@@ -180,6 +183,102 @@ describe("buildCachedState", () => {
     });
 
     expect(state.zero_trust_enabled).toBe(true);
+  });
+
+  test("emits Mongo route_policy as agent-facing policy and keeps certs plus WAF", () => {
+    const state = buildCachedState({
+      domainDocs: [{
+        _id: "domain-1",
+        domain: "example.com",
+        target_url: "https://origin.internal",
+        certificate_pem: "-----BEGIN CERTIFICATE-----\nROOT\n-----END CERTIFICATE-----",
+        private_key_pem: "-----BEGIN PRIVATE KEY-----\nROOT\n-----END PRIVATE KEY-----",
+        route_policy: {
+          cache: { enabled: true, ttl_seconds: 30, unknown_flag: true },
+          bandwidth: { enabled: true, bytes_per_second: 4096, burst_bytes: 8192, key: "host" },
+          rate_limit: { enabled: true },
+        },
+        subdomains: [{
+          _id: "sub-1",
+          subdomain: "api",
+          full_domain: "api.example.com",
+          target_url: "https://api.internal",
+          certificate_pem: "-----BEGIN CERTIFICATE-----\nAPI\n-----END CERTIFICATE-----",
+          private_key_pem: "-----BEGIN PRIVATE KEY-----\nAPI\n-----END PRIVATE KEY-----",
+          route_policy: { cache: { ttl_seconds: 15 } },
+        }],
+        waf_rules: [{ _id: "rule-1", name: "block bots", expression: "bot", priority: 10 }],
+      }],
+      proxyConfigDocs: [],
+      globalRuleDocs: [
+        { _id: "global-1", name: "global", expression: "attack", action: "allow", priority: 20 },
+      ],
+      userDocs: [],
+      settingsDoc: {},
+    });
+
+    const domainJson = JSON.parse(JSON.stringify(state.domains[0]));
+    expect(domainJson).not.toHaveProperty("route_policy");
+    expect(domainJson.policy).toEqual({
+      cache: { enabled: true, ttl_seconds: 30 },
+      bandwidth: { enabled: true, bytes_per_second: 4096, burst_bytes: 8192, key: "host" },
+    });
+    expect(domainJson.certificate_pem).toContain("BEGIN CERTIFICATE");
+    expect(domainJson.private_key_pem).toContain("BEGIN PRIVATE KEY");
+    expect(domainJson.subdomains[0].policy).toEqual({ cache: { ttl_seconds: 15 } });
+    expect(domainJson.subdomains[0].certificate_pem).toContain("API");
+    expect(domainJson.subdomains[0].private_key_pem).toContain("API");
+    expect(state.waf_rules.map((rule) => rule.name)).toEqual(["global", "block bots"]);
+    expect(state.waf_rules.find((rule) => rule.name === "block bots")?.hosts).toEqual([
+      "example.com",
+      "api.example.com",
+    ]);
+  });
+
+  test("omits empty policy and drops invalid bandwidth keys", () => {
+    const state = buildCachedState({
+      domainDocs: [
+        {
+          _id: "empty",
+          domain: "empty.example",
+          route_policy: { cache: {}, bandwidth: { key: "asn" } },
+        },
+        {
+          _id: "partial",
+          domain: "partial.example",
+          route_policy: { bandwidth: { bytes_per_second: 4096, key: "asn" } },
+        },
+        {
+          _id: "seed",
+          domain: "seed.example",
+          policy: { cache: { enabled: false } },
+        },
+      ],
+      proxyConfigDocs: [],
+      globalRuleDocs: [],
+      userDocs: [],
+      settingsDoc: {},
+    });
+
+    const [emptyDomain, partialDomain, seedDomain] = state.domains.map((domain) => JSON.parse(JSON.stringify(domain)));
+    expect(emptyDomain).not.toHaveProperty("policy");
+    expect(partialDomain.policy).toEqual({ bandwidth: { bytes_per_second: 4096 } });
+    expect(seedDomain.policy).toEqual({ cache: { enabled: false } });
+  });
+});
+
+describe("normalizeRoutePolicy", () => {
+  test("drops unknown keys and out-of-range numbers without clamping", () => {
+    expect(normalizeRoutePolicy({
+      cache: { enabled: true, ttl_seconds: 0, max_entries: 250 },
+      bandwidth: { key: "route", bytes_per_second: 512 },
+      extra: true,
+    })).toEqual({
+      cache: { enabled: true, max_entries: 250 },
+      bandwidth: { key: "route" },
+    });
+    expect(normalizeRoutePolicy(null)).toBeUndefined();
+    expect(normalizeRoutePolicy({ cache: { ttl_seconds: "30" } })).toEqual({ cache: { ttl_seconds: 30 } });
   });
 });
 

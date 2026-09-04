@@ -6,6 +6,12 @@ MongoDB, then exposes normalized snapshots for polling agents. If MongoDB is
 unavailable, the last in-memory snapshot remains active and startup can fall
 back to a local seed file.
 
+Dashboard writes (routes, TLS PEMs, and `route_policy`) land in MongoDB. This
+service polls those documents and publishes `GET /domains` for the NetGoat
+agent. The agent-facing JSON field is **`policy`** (`cache` / `bandwidth`), not
+`route_policy`, so UI-managed route policy reaches the agent without YAML.
+Domain-embedded and global `waf_rules` stay on the same snapshot.
+
 ## Run it
 
 Requirements: Bun 1.3 or newer and, optionally, MongoDB.
@@ -36,7 +42,7 @@ header. Without it, write access falls back to the normal API authentication.
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/` or `/health` | Liveness, Mongo status, and cached counts |
-| `GET` | `/domains` | Active routes, upstreams, WAF rules, zero-trust state, and agent settings |
+| `GET` | `/domains` | Active routes, TLS PEMs, per-route `policy`, upstreams, WAF rules, zero-trust state, and agent settings |
 | `GET` | `/users` | Active, non-banned control-plane users |
 | `GET` | `/agent-config` | Current normalized agent runtime settings |
 | `PUT` | `/agent-config` | Validate and update agent runtime settings |
@@ -76,6 +82,7 @@ bun run test
 bun run typecheck
 ```
 
-The test suite covers snapshot filtering and upstream mapping, seed conversion,
-request-size and media-type enforcement, secret redaction, model indexes,
-session expiry, invite lookup isolation, and DNS validation.
+The test suite covers snapshot filtering and upstream mapping, route `policy`
+emission from Mongo `route_policy`, seed conversion, request-size and media-type
+enforcement, secret redaction, model indexes, session expiry, invite lookup
+isolation, and DNS validation.
